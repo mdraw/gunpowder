@@ -95,6 +95,7 @@ class Train(GenericTrain):
         log_dir: str = None,
         log_every: int = 1,
         spawn_subprocess: bool = False,
+        resume: bool = True,
     ):
 
         if not model.training:
@@ -119,6 +120,7 @@ class Train(GenericTrain):
         self.loss_inputs = loss_inputs
         self.checkpoint_basename = checkpoint_basename
         self.save_every = save_every
+        self.resume = resume
 
         self.iteration = 0
 
@@ -175,21 +177,19 @@ class Train(GenericTrain):
         if isinstance(self.loss, torch.nn.Module):
             self.loss = self.loss.to(self.device)
 
-        checkpoint, self.iteration = self._get_latest_checkpoint(
-            self.checkpoint_basename
-        )
+        if self.resume:
+            checkpoint, self.iteration = self._get_latest_checkpoint(
+                self.checkpoint_basename
+            )
+            if checkpoint is not None:
 
-        if checkpoint is not None:
+                logger.info("Resuming training from iteration %d", self.iteration)
+                logger.info("Loading %s", checkpoint)
 
-            logger.info("Resuming training from iteration %d", self.iteration)
-            logger.info("Loading %s", checkpoint)
-
-            checkpoint = torch.load(checkpoint, map_location=self.device)
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
+                checkpoint = torch.load(checkpoint, map_location=self.device)
+                self.model.load_state_dict(checkpoint["model_state_dict"])
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         else:
-
             logger.info("Starting training from scratch")
 
         logger.info("Using device %s", self.device)
