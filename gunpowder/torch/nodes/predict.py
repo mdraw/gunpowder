@@ -107,10 +107,10 @@ class Predict(GenericPredict):
 
         if self.checkpoint is not None:
             checkpoint = torch.load(self.checkpoint, map_location=self.device)
-            if "model_state_dict" in checkpoint:
+            if isinstance(checkpoint, torch.jit.ScriptModule):
+                self.model = checkpoint
+            elif hasattr(checkpoint, "keys") and "model_state_dict" in checkpoint:
                 self.model.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                self.model.load_state_dict()
 
     def predict(self, batch, request):
         inputs = self.get_inputs(batch)
