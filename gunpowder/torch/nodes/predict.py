@@ -107,7 +107,8 @@ class Predict(GenericPredict):
 
         if self.checkpoint is not None:
             checkpoint = torch.load(self.checkpoint, map_location=self.device)
-            if isinstance(checkpoint, torch.jit.ScriptModule):
+            if isinstance(checkpoint, (torch.nn.Module, torch.jit.ScriptModule)):
+                # checkpoint is a standalone model itself, so we use it directly as the model
                 self.model = checkpoint
             elif hasattr(checkpoint, "keys") and "model_state_dict" in checkpoint:
                 self.model.load_state_dict(checkpoint["model_state_dict"])

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from pickle import PickleError
 import pprint
 import warnings
@@ -17,6 +18,7 @@ from gunpowder.nodes.generic_train import GenericTrain
 from typing import Dict, Union, Optional
 
 from torch.utils import collect_env
+from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,25 @@ class Train(GenericTrain):
         spawn_subprocess (``bool``, optional):
 
             Whether to run the ``train_step`` in a separate process. Default is false.
+
+        enable_amp:
+
+            Enable automatic mixed precision training.
+
+        save_jit:
+
+            Save jit-compiled model checkpoints in addition to other formats, either
+            ``'script'``, ``'trace'`` or ``None`` (disabled).
+
+        example_input:
+
+            Example input tensor for jit tracing (only used if ``save_jit='trace'``)
+
+        cfg:
+
+            ``omegaconf.DictConfig`` object that holds the experiment config. If supplied
+            it will be saved in model checkpoints.
+
     """
 
     def __init__(
@@ -109,6 +130,7 @@ class Train(GenericTrain):
         enable_amp: bool = True,
         save_jit: str = 'script',
         example_input: Optional[torch.Tensor] = None,
+        cfg: Optional[DictConfig] = None,
     ):
 
         if not model.training:
@@ -137,6 +159,7 @@ class Train(GenericTrain):
         self.enable_amp = enable_amp
         self.save_jit = save_jit
         self.example_input = example_input
+        self.cfg = cfg
 
         self.iteration = 0
 
@@ -178,6 +201,29 @@ class Train(GenericTrain):
                     "only ints and strings are supported as gradients keys"
                 )
             tensor.retain_grad()
+
+    # Override GenericTrain.process(), removing overly verbose logging
+    def process(self, batch, request):
+        start = time.time()
+
+        if self.spawn_subprocess:
+            self.batch_in.put((batch, request))
+            try:
+                out = self.worker.get()
+            except WorkersDied:
+                raise TrainProcessDied()
+            for array_key in self.provided_arrays:
+                if array_key in request:
+                    batch.arrays[array_key] = out.arrays[array_key]
+            batch.loss = out.loss
+            batch.iteration = out.iteration
+        else:
+            self.train_step(batch, request)
+
+        time_of_iteration = time.time() - start
+        # logger.info(
+        #     "Train process: iteration=%d loss=%f time=%f",
+        #     batch.iteration, batch.loss, time_of_iteration)
 
     def start(self):
 
@@ -404,7 +450,7 @@ class Train(GenericTrain):
             self.checkpoint_basename, self.iteration
         )
 
-        state_dict_path = f'{checkpoint_stem}_state_dict{suffix}.pth'
+        state_dict_path = f'{checkpoint_stem}{suffix}.pth'
         model_path = f'{checkpoint_stem}{suffix}.pt'
 
         try:
@@ -420,13 +466,19 @@ class Train(GenericTrain):
         #  transform object, it may not be picklable)
         info = {k: str(v) for k, v in info.items()}
 
-        torch.save({
+        cfg_yaml = '' if self.cfg is None else OmegaConf.to_yaml(self.cfg, resolve=True)
+        cfg_dict = {} if self.cfg is None else OmegaConf.to_container(self.cfg, resolve=True)
+
+        full_dict = {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'lr_sched_state_dict': lr_sched_state,
             'scaler_state_dict': self.scaler.state_dict(),
-            'info': info
-        }, state_dict_path)
+            'info': info,
+        }
+        if self.cfg is not None:
+            full_dict['cfg'] = cfg_dict
+        torch.save(full_dict, state_dict_path)
         log(f'Saved state_dict as {state_dict_path}')
         pts_model_path = f'{model_path}s'
         try:
@@ -463,6 +515,8 @@ class Train(GenericTrain):
             with zipfile.ZipFile(pts_model_path, 'a', compression=zipfile.ZIP_DEFLATED) as zfile:
                 infostr = pprint.pformat(info, indent=2, width=120)
                 zfile.writestr('info.txt', infostr)
+                if self.cfg is not None:
+                    zfile.writestr('config.yaml', cfg_yaml)
 
     def __collect_requested_outputs(self, request):
 
