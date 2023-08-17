@@ -3,11 +3,18 @@ try:
 except:
     import queue as Queue
 import logging
-import multiprocessing
+
 import os
 import sys
 import time
 import traceback
+
+if os.getenv('GP_MP', 'CPYTHON') == 'TORCH':
+    # Use torch's mp impl for shared memory based IPC
+    logging.debug("Using torch.multiprocessing")
+    import torch.multiprocessing as multiprocessing
+else:
+    import multiprocessing
 
 import numpy as np
 
@@ -25,9 +32,9 @@ class WorkersDied(Exception):
 class ProducerPool(object):
 
     def __init__(self, callables, queue_size=10):
-        self.__watch_dog = multiprocessing.Process(target=self.__run_watch_dog, args=(callables,))
-        self.__stop = multiprocessing.Event()
-        self.__result_queue = multiprocessing.Queue(queue_size)
+        self._watch_dog = multiprocessing.Process(target=self._run_watch_dog, args=(callables,))
+        self._stop = multiprocessing.Event()
+        self._result_queue = multiprocessing.Queue(queue_size)
 
     def __del__(self):
         self.stop()
@@ -35,15 +42,15 @@ class ProducerPool(object):
     def start(self):
         '''Start the pool of producers.'''
 
-        if self.__watch_dog is None:
+        if self._watch_dog is None:
             raise RuntimeError("can't start a ProducerPool a second time")
 
-        if self.__watch_dog.is_alive():
+        if self._watch_dog.is_alive():
             logger.warning("trying to start workers, but they are already running")
             return
 
-        self.__stop.clear()
-        self.__watch_dog.start()
+        self._stop.clear()
+        self._watch_dog.start()
 
     def get(self, timeout=0):
         '''Return the next result from the producer pool.
@@ -61,7 +68,7 @@ class ProducerPool(object):
         while item == None:
 
             try:
-                item = self.__result_queue.get(timeout=timeout)
+                item = self._result_queue.get(timeout=timeout)
             except Queue.Empty:
                 if not block:
                     raise NoResult()
@@ -75,21 +82,21 @@ class ProducerPool(object):
 
         Items currently being produced will not be waited for and be discarded.'''
 
-        if self.__watch_dog is None:
+        if self._watch_dog is None:
             return
 
-        self.__stop.set()
-        self.__watch_dog.join()
-        self.__watch_dog = None
+        self._stop.set()
+        self._watch_dog.join()
+        self._watch_dog = None
 
-    def __run_watch_dog(self, callables):
+    def _run_watch_dog(self, callables):
 
         parent_pid = os.getppid()
 
         logger.debug("watchdog started with PID " + str(os.getpid()))
         logger.debug("parent PID " + str(parent_pid))
 
-        workers = [ multiprocessing.Process(target=self.__run_worker, args=(c,)) for c in callables ]
+        workers = [ multiprocessing.Process(target=self._run_worker, args=(c,)) for c in callables ]
 
         try:
 
@@ -97,14 +104,14 @@ class ProducerPool(object):
             for worker in workers:
                 worker.start()
 
-            while not self.__stop.wait(1):
+            while not self._stop.wait(1):
                 if os.getppid() != parent_pid:
                     logger.error("parent of producer pool died, shutting down")
-                    self.__result_queue.put(ParentDied())
+                    self._result_queue.put(ParentDied())
                     break
-                if not self.__all_workers_alive(workers):
+                if not self._all_workers_alive(workers):
                     logger.error("at least one of my workers died, shutting down")
-                    self.__result_queue.put(WorkersDied())
+                    self._result_queue.put(WorkersDied())
                     break
         except:
             pass
@@ -121,7 +128,7 @@ class ProducerPool(object):
 
             logger.info("done")
 
-    def __run_worker(self, target):
+    def _run_worker(self, target):
 
         parent_pid = os.getppid()
 
@@ -152,7 +159,7 @@ class ProducerPool(object):
                     break
 
             try:
-                self.__result_queue.put(result, timeout=1)
+                self._result_queue.put(result, timeout=1)
                 result = None
             except Queue.Full:
                 logger.debug("worker %d: result queue is full, waiting to place my result"%os.getpid())
@@ -160,5 +167,5 @@ class ProducerPool(object):
         logger.debug("worker with PID " + str(os.getpid()) + " exiting")
         os._exit(1)
 
-    def __all_workers_alive(self, workers):
+    def _all_workers_alive(self, workers):
         return all([ worker.is_alive() for worker in workers ])
